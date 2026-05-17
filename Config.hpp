@@ -10,6 +10,7 @@ struct ErrorPages {
 };
 
 struct Location {
+    std::string url;
     std::vector<std::string> allowedMethods;
     long long max_byte;
     std::string redirect;
@@ -31,10 +32,13 @@ struct Server {
 
 
 class Config {
-    private:
-        std::vector<Server> servers;
     public:
+        std::vector<Server> servers;
         
+        Config();
+        Config(const Config& conf);
+        Config& operator=(const Config& conf);
+        Config(std::string file_path);
 };
 
 #endif
