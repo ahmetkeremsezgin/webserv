@@ -24,6 +24,7 @@ struct Location {
 
 struct Server {
     std::string interface;
+    int server_fd;
     int port;
     long long max_byte;
     std::vector<ErrorPages> errorPages;
