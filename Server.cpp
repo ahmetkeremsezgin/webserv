@@ -1,4 +1,5 @@
 #include "Server.hpp"
+#include "Client.hpp"
 #include "Config.hpp"
 #include <string.h>
 #include <sys/types.h>
@@ -8,25 +9,29 @@
 #include <arpa/inet.h>
 #include <iostream>
 #include <vector>
+#include <map>
 
-struct clientDetails {
-    std::vector<int> serverFds;
-    std::vector<int> clientList;
+struct serverState {
+    std::map<int, Server> serverConfigs;
+    std::map<int, Client*> clients;
 };
 
-int ServerRunner::OpenSocket(std::vector<Server> servers) {
-    clientDetails client;
+ServerRunner::ServerRunner(std::vector<Server> servers) {
+    serverState state;
+    fd_set readfds;
+    fd_set writefds;
+    int maxfd = -1;
 
     for (size_t i = 0; i < servers.size(); ++i) {
         int sfd = socket(AF_INET, SOCK_STREAM, 0);
         if (sfd <= 0) {
-            std::cerr << "socket creation error" << std::endl;
+            std::cerr << "Socket creation error" << std::endl;
             continue;
         }
 
         int opt = 1;
         if (setsockopt(sfd, SOL_SOCKET, SO_REUSEADDR, (char *)&opt, sizeof opt) < 0) {
-            std::cerr << "setSocketopt" << std::endl;
+            std::cerr << "setsockopt error" << std::endl;
         }
 
         struct sockaddr_in serverAddress;
@@ -35,96 +40,111 @@ int ServerRunner::OpenSocket(std::vector<Server> servers) {
         serverAddress.sin_addr.s_addr = INADDR_ANY;
 
         if (bind(sfd, (struct sockaddr*)&serverAddress, sizeof(serverAddress)) < 0) {
-            std::cerr << "bind error" << std::endl;
+            std::cerr << "Bind error" << std::endl;
             close(sfd);
             continue;
         }
 
         if (listen(sfd, 5) < 0) {
-            std::cerr << "listen error" << std::endl;
+            std::cerr << "Listen error" << std::endl;
             close(sfd);
             continue;
         }
 
-        client.serverFds.push_back(sfd);
+        state.serverConfigs[sfd] = servers[i];
+        if (sfd > maxfd) {
+            maxfd = sfd;
+        }
     }
 
-    if (client.serverFds.empty()) {
+    if (state.serverConfigs.empty()) {
         std::cerr << "No servers could be started" << std::endl;
-        return -1;
+        return;
     }
 
-    fd_set readfds;
-    ssize_t valerad;
-    int maxfd;
-    int activity;
+    std::cout << "Servers started, waiting for connections..." << std::endl;
 
     while (true) {
-        std::cout << "Ready For Connect" << std::endl;
         FD_ZERO(&readfds);
-        maxfd = -1;
+        FD_ZERO(&writefds);
+        int current_maxfd = maxfd;
 
-        for (size_t i = 0; i < client.serverFds.size(); ++i) {
-            int sfd = client.serverFds[i];
-            FD_SET(sfd, &readfds);
-            if (sfd > maxfd) {
-                maxfd = sfd;
+        for (std::map<int, Server>::iterator it = state.serverConfigs.begin(); it != state.serverConfigs.end(); ++it) {
+            FD_SET(it->first, &readfds);
+            if (it->first > current_maxfd) {
+                current_maxfd = it->first;
             }
         }
 
-        std::vector<int>::const_iterator it;
-        for (it = client.clientList.begin(); it != client.clientList.end(); ++it) {
-            int sd = *it;
-            FD_SET(sd, &readfds);
-            if (sd > maxfd) {
-                maxfd = sd;
+        for (std::map<int, Client*>::iterator it = state.clients.begin(); it != state.clients.end(); ++it) {
+            int client_fd = it->first;
+            Client* client_obj = it->second;
+
+            FD_SET(client_fd, &readfds);
+
+            if (client_obj->isResponseReady()) {
+                FD_SET(client_fd, &writefds);
+            }
+
+            if (client_fd > current_maxfd) {
+                current_maxfd = client_fd;
             }
         }
 
-        activity = select(maxfd + 1, &readfds, NULL, NULL, NULL);
+        int activity = select(current_maxfd + 1, &readfds, &writefds, NULL, NULL);
         if (activity < 0) {
             std::cerr << "Select error" << std::endl;
             continue;
         }
 
-        for (size_t i = 0; i < client.serverFds.size(); ++i) {
-            int sfd = client.serverFds[i];
+        for (std::map<int, Server>::iterator it = state.serverConfigs.begin(); it != state.serverConfigs.end(); ++it) {
+            int sfd = it->first;
             if (FD_ISSET(sfd, &readfds)) {
                 struct sockaddr_in clientAddress;
                 socklen_t addrlen = sizeof(clientAddress);
                 int new_client_fd = accept(sfd, (struct sockaddr *)&clientAddress, &addrlen);
                 
                 if (new_client_fd < 0) {
-                    std::cerr << "accept error" << std::endl;
+                    std::cerr << "Accept error" << std::endl;
                     continue;
                 }
                 
-                std::cout << "New connection accepted on port " << servers[i].port << ", fd: " << new_client_fd << std::endl;
-                client.clientList.push_back(new_client_fd);
+                std::cout << "New connection accepted. Port: " << it->second.port << ", FD: " << new_client_fd << std::endl;
+                
+                state.clients[new_client_fd] = new Client(new_client_fd, it->second);
             }
         }
 
-        char message[1024];
-        for (size_t i = 0; i < client.clientList.size(); ++i) {
-            int sd = client.clientList[i];
-            if (FD_ISSET(sd, &readfds)) {
-                memset(message, 0, 1024);
-                valerad = read(sd, message, 1023);
-                
-                if (valerad <= 0) {
-                    std::cout << "client disconnect, fd: " << sd << std::endl;
-                    close(sd);
-                    client.clientList.erase(client.clientList.begin() + i);
-                    --i;
-                } else {
-                    std::cout << "Message: " << message << std::endl;
+        std::map<int, Client*>::iterator it = state.clients.begin();
+        while (it != state.clients.end()) {
+            int client_fd = it->first;
+            Client* client_obj = it->second;
+            bool disconnect_client = false;
+
+            if (FD_ISSET(client_fd, &readfds)) {
+                if (!client_obj->readData()) {
+                    std::cout << "Client disconnected, FD: " << client_fd << std::endl;
+                    disconnect_client = true;
+                } else if (client_obj->isRequestReady() && !client_obj->isResponseReady()) {
+                    client_obj->processRequest();
                 }
+            }
+
+            if (!disconnect_client && FD_ISSET(client_fd, &writefds)) {
+                if (!client_obj->sendData()) {
+                    std::cout << "Client task finished or disconnected, FD: " << client_fd << std::endl;
+                    disconnect_client = true;
+                }
+            }
+
+            if (disconnect_client) {
+                delete client_obj;
+                std::map<int, Client*>::iterator temp_it = it;
+                ++it;
+                state.clients.erase(temp_it);
+            } else {
+                ++it;
             }
         }
     }
-    return 1;
-}
-
-ServerRunner::ServerRunner(std::vector<Server> servers) {
-    OpenSocket(servers);
 }

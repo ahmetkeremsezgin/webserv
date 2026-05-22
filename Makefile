@@ -6,6 +6,7 @@ SRCS = main.cpp \
 	Cgi.cpp \
 	Server.cpp \
 	Config.cpp \
+	Client.cpp \
 
 OBJS = $(SRCS:.cpp=.o)
 
