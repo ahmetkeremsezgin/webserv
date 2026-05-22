@@ -2,9 +2,13 @@
 #include <unistd.h>
 #include <sys/socket.h>
 #include <iostream>
+#include <sstream>
+#include "HttpResponse.hpp"
+#include <cstdlib>
 
 Client::Client(int fd, const Server& config) 
-    : _fd(fd), _serverConfig(config), _isRequestReady(false), _isResponseReady(false) {
+    : _fd(fd), _serverConfig(config), _isRequestReady(false), _isResponseReady(false),
+      _state(READING_HEADERS), _headerLength(0), _contentLength(0) {
 }
 
 Client::~Client() {
@@ -24,7 +28,7 @@ bool Client::isResponseReady() const {
 }
 
 bool Client::readData() {
-    char buffer[1024];
+    char buffer[4096];
     int bytesRead = read(_fd, buffer, sizeof(buffer) - 1);
 
     if (bytesRead <= 0) {
@@ -32,9 +36,45 @@ bool Client::readData() {
     }
 
     buffer[bytesRead] = '\0';
-    _requestBuffer += buffer;
+    _requestBuffer.append(buffer, bytesRead);
 
-    if (_requestBuffer.find("\r\n\r\n") != std::string::npos) {
+    if (_state == READING_HEADERS) {
+        size_t headerEnd = _requestBuffer.find("\r\n\r\n");
+        if (headerEnd != std::string::npos) {
+            _headerLength = headerEnd + 4;
+            
+            std::string headerPart = _requestBuffer.substr(0, headerEnd);
+            
+            if (headerPart.find("Transfer-Encoding: chunked") != std::string::npos) {
+                _state = READING_CHUNKED;
+            } 
+            else {
+                size_t clPos = headerPart.find("Content-Length: ");
+                if (clPos != std::string::npos) {
+                    size_t clEnd = headerPart.find("\r\n", clPos);
+                    std::string clStr = headerPart.substr(clPos + 16, clEnd - (clPos + 16));
+                    _contentLength = std::atoi(clStr.c_str());
+                    _state = READING_BODY;
+                } else {
+                    _state = REQUEST_READY;
+                }
+            }
+        }
+    }
+
+    if (_state == READING_BODY) {
+        if (_requestBuffer.length() >= _headerLength + _contentLength) {
+            _state = REQUEST_READY;
+        }
+    }
+
+    if (_state == READING_CHUNKED) {
+        if (_requestBuffer.find("0\r\n\r\n") != std::string::npos) {
+            _state = REQUEST_READY;
+        }
+    }
+
+    if (_state == REQUEST_READY) {
         _isRequestReady = true;
     }
 
@@ -42,15 +82,17 @@ bool Client::readData() {
 }
 
 void Client::processRequest() {
-    std::cout << "Gelen Istek:\n" << _requestBuffer << std::endl;
+    _request.parse(_requestBuffer);
 
-    std::string body = "<h1>Merhaba, yeni Client sinifindan geliyorum!</h1>";
-    
-    _responseBuffer = "HTTP/1.1 200 OK\r\n";
-    _responseBuffer += "Content-Type: text/html\r\n";
-    _responseBuffer += "Content-Length: 51\r\n";
-    _responseBuffer += "\r\n";
-    _responseBuffer += body;
+    if (!_request.isParsed()) {
+        _responseBuffer = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n";
+        _isResponseReady = true;
+        return;
+    }
+
+    // Yeni Response Sınıfımızı Kullanıyoruz!
+    HttpResponse response(_request, _serverConfig);
+    _responseBuffer = response.getRawResponse();
 
     _isResponseReady = true;
 }

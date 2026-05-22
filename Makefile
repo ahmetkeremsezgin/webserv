@@ -7,6 +7,8 @@ SRCS = main.cpp \
 	Server.cpp \
 	Config.cpp \
 	Client.cpp \
+	HttpRequest.cpp \
+	HttpResponse.cpp \
 
 OBJS = $(SRCS:.cpp=.o)
 
