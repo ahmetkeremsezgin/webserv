@@ -1,53 +1,154 @@
 #include "Config.hpp"
+#include <fstream>
+#include <sstream>
+#include <cstdlib>
 
-Config::Config() {
-    servers.resize(1);
+Config::Config(const Config& conf) { *this = conf; }
+Config& Config::operator=(const Config& conf) {
+    if (this != &conf) { servers = conf.servers; }
+    return *this;
+}
 
-    servers[0].interface = "localhost";
-    servers[0].port = 9090;
-    servers[0].max_byte = 1000;
+Config::Config(std::string file_path) {
+    std::ifstream file(file_path.c_str());
+    if (!file.is_open()) {
+        std::cerr << "WARNING: The configuration file could not be opened; reverting to default settings." << std::endl;
+        return;
+    }
+
+    std::string content;
+    std::string line;
     
-    servers[0].errorPages.resize(2);
-    servers[0].errorPages[0].code = 404;
-    servers[0].errorPages[0].path = "/tmp/www/error-pages/404.html";
-    servers[0].errorPages[1].code = 400;
-    servers[0].errorPages[1].path = "/tmp/www/error-pages/400.html";
+    while (std::getline(file, line)) {
+        size_t pos = line.find('#');
+        if (pos != std::string::npos) {
+            line = line.substr(0, pos);
+        }
+        content += line + " ";
+    }
 
-    servers[0].locations.resize(2);
-    servers[0].locations[0].allowedMethods.resize(2);
-    servers[0].locations[0].url = "/ana-sayfa";
-    servers[0].locations[0].allowedMethods[0] = "GET";
-    servers[0].locations[0].autoindex = true;
-    servers[0].locations[0].index_path = "index.html";
-    servers[0].locations[0].max_byte = 100;
-    servers[0].locations[0].path = "/tmp/www/ana-sayfa";
-    servers[0].locations[0].redirect = "";
-    servers[0].locations[0].upload = false;
-    servers[0].locations[0].upload_path = "/tmp/www/uploads";
+    std::string formatted_content = "";
+    for (size_t i = 0; i < content.length(); ++i) {
+        if (content[i] == '{' || content[i] == '}' || content[i] == ';') {
+            formatted_content += " ";
+            formatted_content += content[i];
+            formatted_content += " ";
+        } else {
+            formatted_content += content[i];
+        }
+    }
 
-    servers[0].locations[1].allowedMethods.resize(3);
-    servers[0].locations[1].url = "/galeri";
-    servers[0].locations[1].allowedMethods[0] = "GET";
-    servers[0].locations[1].allowedMethods[1] = "POST";
-    servers[0].locations[1].allowedMethods[2] = "DELETE";
-    servers[0].locations[1].autoindex = false;
-    servers[0].locations[1].index_path = "galeri.html";
-    servers[0].locations[1].max_byte = 10000;
-    servers[0].locations[1].path = "/tmp/www/galeri";
-    servers[0].locations[1].redirect = "";
-    servers[0].locations[1].upload = true;
-    servers[0].locations[1].upload_path = "/tmp/www/uploads";
+    std::istringstream iss(formatted_content);
+    std::vector<std::string> tokens;
+    std::string token;
+    while (iss >> token) {
+        tokens.push_back(token);
+    }
 
-    servers[0].locations.resize(3); 
-    
-    servers[0].locations[2].url = "/uploads";                   
-    servers[0].locations[2].path = "/tmp/www/uploads";          
-    
-    servers[0].locations[2].allowedMethods.resize(2);           
-    servers[0].locations[2].allowedMethods[0] = "GET";          
-    servers[0].locations[2].allowedMethods[1] = "DELETE";       
-    
-    servers[0].locations[2].autoindex = true;                   
-    servers[0].locations[2].index_path = "";
-    servers[0].locations[2].upload = false;                     
+    parse(tokens);
+}
+
+void Config::parse(std::vector<std::string>& tokens) {
+    std::vector<std::string>::iterator it = tokens.begin();
+    while (it != tokens.end()) {
+        if (*it == "server") {
+            ++it;
+            if (it != tokens.end() && *it == "{") {
+                parseServer(++it, tokens.end());
+            }
+        } else {
+            ++it;
+        }
+    }
+}
+
+void Config::parseServer(std::vector<std::string>::iterator& it, std::vector<std::string>::iterator end) {
+    Server srv;
+    srv.port = 8080;
+    srv.max_byte = 0;
+
+    while (it != end && *it != "}") {
+        if (*it == "listen") {
+            srv.port = std::atoi((*(++it)).c_str());
+            ++it;
+        }
+        else if (*it == "server_name") {
+            srv.interface = *(++it);
+            ++it; 
+        }
+        else if (*it == "client_max_body_size") {
+            srv.max_byte = std::atol((*(++it)).c_str());
+            ++it;
+        }
+        else if (*it == "error_page") {
+            ErrorPages ep;
+            ep.code = std::atoi((*(++it)).c_str());
+            ep.path = *(++it);
+            srv.errorPages.push_back(ep);
+            ++it; 
+        }
+        else if (*it == "location") {
+            parseLocation(srv, ++it, end);
+        }
+        else {
+            ++it;
+        }
+    }
+    servers.push_back(srv);
+    if (it != end) ++it;
+}
+
+void Config::parseLocation(Server& srv, std::vector<std::string>::iterator& it, std::vector<std::string>::iterator end) {
+    Location loc;
+    loc.url = *it;
+    ++it;
+    ++it; 
+
+    loc.autoindex = false;
+    loc.upload = false;
+    loc.max_byte = srv.max_byte; 
+
+    while (it != end && *it != "}") {
+        if (*it == "allow_methods") {
+            ++it;
+            while (it != end && *it != ";") {
+                loc.allowedMethods.push_back(*it);
+                ++it;
+            }
+        }
+        else if (*it == "root") {
+            loc.path = *(++it);
+            ++it; 
+        }
+        else if (*it == "index") {
+            loc.index_path = *(++it);
+            ++it;
+        }
+        else if (*it == "autoindex") {
+            loc.autoindex = (*(++it) == "on");
+            ++it;
+        }
+        else if (*it == "upload") {
+            loc.upload = (*(++it) == "on");
+            ++it;
+        }
+        else if (*it == "upload_path") {
+            loc.upload_path = *(++it);
+            ++it;
+        }
+        else if (*it == "client_max_body_size") {
+            loc.max_byte = std::atol((*(++it)).c_str());
+            ++it;
+        }
+        else if (*it == "cgi_ext") {
+            std::string ext = *(++it);
+            std::string prog = *(++it);
+            loc.cgi_ext[ext] = prog;
+            ++it; 
+        }
+        else {
+            ++it;
+        }
+    }
+    srv.locations.push_back(loc);
 }

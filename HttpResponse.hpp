@@ -27,6 +27,7 @@ private:
     void handleDelete(const Location* loc);
     bool isDirectory(const std::string& path);
     void handleAutoindex(const std::string& targetPath, const std::string& uri);
+    bool executeCgiIfMatch(const std::string& targetPath, const Location* loc);
 public:
     HttpResponse(const HttpRequest& req, const Server& config);
     ~HttpResponse();

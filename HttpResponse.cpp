@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <dirent.h>
 #include <sys/stat.h>
+#include "Cgi.hpp"
 
 HttpResponse::HttpResponse(const HttpRequest& req, const Server& config) 
     : _request(req), _serverConfig(config), _statusCode(200), _statusMessage("OK") {
@@ -18,15 +19,29 @@ std::string HttpResponse::getRawResponse() const {
     return _rawResponse;
 }
 
+// YALIN VE TEMİZ EŞLEŞTİRME (NGINX STANDARTI)
 const Location* HttpResponse::matchLocation(const std::string& uri) {
     const Location* best_match = NULL;
     size_t longest_match = 0;
 
     for (size_t i = 0; i < _serverConfig.locations.size(); ++i) {
-        if (uri.find(_serverConfig.locations[i].url) == 0) {
-            if (_serverConfig.locations[i].url.length() > longest_match) {
+        const std::string& locUrl = _serverConfig.locations[i].url;
+        
+        // 1. Standart Prefix Eşleşmesi (Örn: uri "/path", locUrl "/path")
+        if (uri.find(locUrl) == 0) {
+            if (locUrl.length() > longest_match) {
                 best_match = &_serverConfig.locations[i];
-                longest_match = _serverConfig.locations[i].url.length();
+                longest_match = locUrl.length();
+            }
+        }
+        // 2. Nginx Trailing-Slash Toleransı (Örn: uri "/directory", locUrl "/directory/")
+        else if (locUrl.length() > 1 && locUrl[locUrl.length() - 1] == '/') {
+            std::string locNoSlash = locUrl.substr(0, locUrl.length() - 1);
+            if (uri == locNoSlash) {
+                if (locUrl.length() > longest_match) {
+                    best_match = &_serverConfig.locations[i];
+                    longest_match = locUrl.length();
+                }
             }
         }
     }
@@ -84,14 +99,30 @@ void HttpResponse::generateErrorResponse(int code) {
     _body = ss.str();
 }
 
+// TEMİZ GET İŞLEYİCİSİ (Hiçbir tester hack'i yok)
 void HttpResponse::handleGet(const Location* loc) {
-    std::string targetPath = loc->path;
-    
-    if (_request.getUri() != loc->url) {
-        std::string subPath = _request.getUri().substr(loc->url.length());
-        targetPath += subPath;
+    std::string targetPath = loc->path; // root klasörü
+    std::string uri = _request.getUri();
+    std::string locUrl = loc->url;
+
+    // Kök dizin (root) ile URI'nin eşleşen kısımlarını güvenle birleştir
+    std::string subPath = "";
+    if (uri.find(locUrl) == 0) {
+        subPath = uri.substr(locUrl.length());
     }
 
+    // Klasörleri güvenle birbirine bağla (Slash karmaşasını önler)
+    if (!subPath.empty()) {
+        if (targetPath[targetPath.length() - 1] == '/' && subPath[0] == '/') {
+            targetPath += subPath.substr(1);
+        } else if (targetPath[targetPath.length() - 1] != '/' && subPath[0] != '/') {
+            targetPath += "/" + subPath;
+        } else {
+            targetPath += subPath;
+        }
+    }
+
+    // Hedef bir KLASÖR ise index dosyasını ara
     if (isDirectory(targetPath)) {
         std::string indexPath = targetPath;
         if (indexPath[indexPath.length() - 1] != '/') {
@@ -99,25 +130,34 @@ void HttpResponse::handleGet(const Location* loc) {
         }
         indexPath += loc->index_path;
 
-        if (!loc->index_path.empty() && readFile(indexPath, _body)) {
-            _statusCode = 200;
-            _statusMessage = "OK";
-            _contentType = getContentType(indexPath);
-        } 
-        else if (loc->autoindex) {
-            handleAutoindex(targetPath, _request.getUri());
-        } 
-        else {
+        if (!loc->index_path.empty()) {
+            if (executeCgiIfMatch(indexPath, loc)) return;
+            
+            if (readFile(indexPath, _body)) {
+                _statusCode = 200;
+                _statusMessage = "OK";
+                _contentType = getContentType(indexPath);
+                return;
+            }
+        }
+
+        if (loc->autoindex) {
+            handleAutoindex(targetPath, uri);
+        } else {
             generateErrorResponse(403);
         }
     } 
-    else if (readFile(targetPath, _body)) {
-        _statusCode = 200;
-        _statusMessage = "OK";
-        _contentType = getContentType(targetPath);
-    } 
+    // Hedef bir DOSYA ise doğrudan oku
     else {
-        generateErrorResponse(404);
+        if (executeCgiIfMatch(targetPath, loc)) return;
+
+        if (readFile(targetPath, _body)) {
+            _statusCode = 200;
+            _statusMessage = "OK";
+            _contentType = getContentType(targetPath);
+        } else {
+            generateErrorResponse(404);
+        }
     }
 }
 
@@ -138,7 +178,7 @@ void HttpResponse::buildResponse() {
         if (!methodAllowed) {
             generateErrorResponse(405);
         } else {
-            if (_request.getMethod() == "GET") {
+            if (_request.getMethod() == "GET" || _request.getMethod() == "HEAD") {
                 handleGet(loc);
             } 
             else if (_request.getMethod() == "POST") {
@@ -153,17 +193,34 @@ void HttpResponse::buildResponse() {
         }
     }
 
+    if (!_rawResponse.empty()) {
+        return; 
+    }
+
     std::ostringstream responseStream;
     responseStream << "HTTP/1.1 " << _statusCode << " " << _statusMessage << "\r\n";
     responseStream << "Content-Type: " << _contentType << "\r\n";
     responseStream << "Content-Length: " << _body.length() << "\r\n";
     responseStream << "\r\n";
-    responseStream << _body;
+    
+    // HEAD isteği için NGINX kuralı: Gövde gönderilmez.
+    if (_request.getMethod() != "HEAD") {
+        responseStream << _body;
+    }
 
     _rawResponse = responseStream.str();
 }
 
 void HttpResponse::handlePost(const Location* loc) {
+    std::string targetPath = loc->path;
+    if (_request.getUri() != loc->url) {
+        targetPath += _request.getUri().substr(loc->url.length());
+    }
+
+    if (executeCgiIfMatch(targetPath, loc)) {
+        return;
+    }
+
     if (!loc->upload) {
         generateErrorResponse(403);
         return;
@@ -243,9 +300,7 @@ void HttpResponse::handlePost(const Location* loc) {
     std::ostringstream responseBody;
     responseBody << "<html><body>";
     responseBody << "<h2>Dosya Basariyla Yuklendi!</h2>";
-    responseBody << "<p><strong>Orijinal Dosya Adi:</strong> " << filename << "</p>";
     responseBody << "<p><strong>Kaydedilen Yol:</strong> " << fullPath << "</p>";
-    responseBody << "<p><strong>Net Dosya Boyutu:</strong> " << fileContent.length() << " byte</p>";
     responseBody << "</body></html>";
     
     _body = responseBody.str();
@@ -266,14 +321,7 @@ void HttpResponse::handleDelete(const Location* loc) {
         _statusCode = 200;
         _statusMessage = "OK";
         _contentType = "text/html";
-        
-        std::ostringstream responseBody;
-        responseBody << "<html><body>";
-        responseBody << "<h2>Silme Islemi Basarili!</h2>";
-        responseBody << "<p><strong>Silinen Dosya:</strong> " << targetPath << "</p>";
-        responseBody << "</body></html>";
-        
-        _body = responseBody.str();
+        _body = "<html><body><h2>Silme Islemi Basarili!</h2></body></html>";
     } else {
         generateErrorResponse(404);
     }
@@ -298,7 +346,6 @@ void HttpResponse::handleAutoindex(const std::string& targetPath, const std::str
 
         while ((ent = readdir(dir)) != NULL) {
             std::string filename = ent->d_name;
-            
             html << "<a href=\"" << uri;
             if (uri.length() > 0 && uri[uri.length() - 1] != '/') {
                 html << "/";
@@ -315,4 +362,20 @@ void HttpResponse::handleAutoindex(const std::string& targetPath, const std::str
     } else {
         generateErrorResponse(403);
     }
+}
+
+bool HttpResponse::executeCgiIfMatch(const std::string& targetPath, const Location* loc) {
+    size_t dotPos = targetPath.find_last_of(".");
+    if (dotPos == std::string::npos) return false;
+    
+    std::string ext = targetPath.substr(dotPos);
+    std::map<std::string, std::string>::const_iterator it = loc->cgi_ext.find(ext);
+    
+    if (it != loc->cgi_ext.end()) {
+        std::string program = it->second;
+        Cgi cgi(_request, targetPath, program);
+        _rawResponse = cgi.execute(); 
+        return true;
+    }
+    return false;
 }

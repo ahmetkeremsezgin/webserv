@@ -3,6 +3,8 @@
 
 #include <iostream>
 #include <vector>
+#include <map>
+#include <string>
 
 struct ErrorPages {
     int code;
@@ -19,8 +21,8 @@ struct Location {
     std::string index_path;
     bool upload;
     std::string upload_path;
+    std::map<std::string, std::string> cgi_ext;
 };
-
 
 struct Server {
     std::string interface;
@@ -31,15 +33,18 @@ struct Server {
     std::vector<Location> locations;
 };
 
-
 class Config {
-    public:
-        std::vector<Server> servers;
-        
-        Config();
-        Config(const Config& conf);
-        Config& operator=(const Config& conf);
-        Config(std::string file_path);
+public:
+    std::vector<Server> servers;
+
+    Config(const Config& conf);
+    Config& operator=(const Config& conf);
+    Config(std::string file_path);
+
+private:
+    void parse(std::vector<std::string>& tokens);
+    void parseServer(std::vector<std::string>::iterator& it, std::vector<std::string>::iterator end);
+    void parseLocation(Server& server, std::vector<std::string>::iterator& it, std::vector<std::string>::iterator end);
 };
 
 #endif
