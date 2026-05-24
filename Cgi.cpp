@@ -5,6 +5,8 @@
 #include <cstring>
 #include <iostream>
 #include <sstream>
+#include <cstdio> 
+#include <cctype>
 
 Cgi::Cgi(const HttpRequest& req, const std::string& scriptPath, const std::string& program)
     : _request(req), _scriptPath(scriptPath), _program(program) {
@@ -19,7 +21,11 @@ void Cgi::initEnv() {
     _env["SERVER_SOFTWARE"]   = "Webserv/1.0";
     
     _env["REQUEST_METHOD"]    = _request.getMethod();
+    _env["REQUEST_URI"]       = _request.getUri();
+    _env["SCRIPT_NAME"]       = _request.getUri();
+    _env["PATH_INFO"]         = _request.getUri();
     _env["SCRIPT_FILENAME"]   = _scriptPath;
+    _env["PATH_TRANSLATED"]   = _scriptPath;
     
     size_t questionMarkPos = _request.getUri().find('?');
     if (questionMarkPos != std::string::npos) {
@@ -35,8 +41,20 @@ void Cgi::initEnv() {
         _env["CONTENT_TYPE"]   = _request.getHeader("Content-Type");
     }
 
-    _env["HTTP_HOST"]       = _request.getHeader("Host");
-    _env["HTTP_USER_AGENT"] = _request.getHeader("User-Agent");
+    const std::map<std::string, std::string>& headers = _request.getHeaders();
+    for (std::map<std::string, std::string>::const_iterator it = headers.begin(); it != headers.end(); ++it) {
+        std::string hName = it->first;
+        
+        for (size_t i = 0; i < hName.length(); ++i) {
+            if (hName[i] == '-') {
+                hName[i] = '_';
+            } else {
+                hName[i] = std::toupper(hName[i]);
+            }
+        }
+        
+        _env["HTTP_" + hName] = it->second;
+    }
 }
 
 char** Cgi::getEnvAsCArray() const {
@@ -53,12 +71,28 @@ char** Cgi::getEnvAsCArray() const {
     return env;
 }
 
-std::string Cgi::execute() {
-    int pipe_in[2];
-    int pipe_out[2];
+std::string Cgi::execute() {    
+    FILE* fileIn = tmpfile();
+    if (!fileIn) return "HTTP/1.1 500 Internal Server Error\r\n\r\nCGI Input Error";
+    int fdIn = fileno(fileIn);
 
-    if (pipe(pipe_in) < 0 || pipe(pipe_out) < 0) {
+    int pipe_out[2];
+    if (pipe(pipe_out) < 0) {
+        fclose(fileIn);
         return "HTTP/1.1 500 Internal Server Error\r\n\r\nCGI Pipe Error";
+    }
+
+    if (_request.getMethod() == "POST" && !_request.getBody().empty()) {        
+        const char* bodyData = _request.getBody().data(); 
+        size_t bodyLen = _request.getBody().length();
+        size_t totalWritten = 0;
+        
+        while (totalWritten < bodyLen) {
+            ssize_t bytes = write(fdIn, bodyData + totalWritten, bodyLen - totalWritten);
+            if (bytes < 0) break;
+            totalWritten += bytes;
+        }
+        lseek(fdIn, 0, SEEK_SET);
     }
 
     pid_t pid = fork();
@@ -67,13 +101,11 @@ std::string Cgi::execute() {
     }
 
     if (pid == 0) {
-        close(pipe_in[1]);
         close(pipe_out[0]);
-        
-        dup2(pipe_in[0], STDIN_FILENO);
+
+        dup2(fdIn, STDIN_FILENO);
         dup2(pipe_out[1], STDOUT_FILENO);
         
-        close(pipe_in[0]);
         close(pipe_out[1]);
 
         char* argv[] = {
@@ -84,46 +116,54 @@ std::string Cgi::execute() {
         char** envp = getEnvAsCArray();
 
         execve(_program.c_str(), argv, envp);
-        
-        for (int i = 0; envp[i] != NULL; ++i) {
-            delete[] envp[i];
-        }
-        delete[] envp;
-        
         exit(1);
     } 
     else {
-        close(pipe_in[0]);
-        close(pipe_out[1]);
-
-        if (_request.getMethod() == "POST" && !_request.getBody().empty()) {
-            write(pipe_in[1], _request.getBody().c_str(), _request.getBody().length());
-        }
-        close(pipe_in[1]);
-
-        int status;
-        waitpid(pid, &status, 0);
-
-        char buffer[4096];
-        std::string cgi_output = "";
-        int bytes_read;
+        close(pipe_out[1]);        
+        char buffer[8192];
+        std::string cgi_output;
+        cgi_output.reserve(_request.getBody().length() + 1024);
         
-        while ((bytes_read = read(pipe_out[0], buffer, sizeof(buffer) - 1)) > 0) {
-            buffer[bytes_read] = '\0';
-            cgi_output += buffer;
+        int bytes_read;
+        while ((bytes_read = read(pipe_out[0], buffer, sizeof(buffer))) > 0) {
+            cgi_output.append(buffer, bytes_read); 
         }
         close(pipe_out[0]);
 
-        if (cgi_output.find("HTTP/1.1") != 0 && cgi_output.find("HTTP/1.0") != 0) {
-            std::string formatted_output = "HTTP/1.1 200 OK\r\n";
-            
-            if (cgi_output.find("Content-Type:") == std::string::npos) {
-                formatted_output += "Content-Type: text/plain\r\n\r\n";
-            }
-            formatted_output += cgi_output;
-            return formatted_output;
+        int status;
+        waitpid(pid, &status, 0);
+        fclose(fileIn);
+
+
+        if (cgi_output.find("HTTP/1.1") == 0 || cgi_output.find("HTTP/1.0") == 0) {
+            return cgi_output;
         }
 
-        return cgi_output;
+        std::string formatted_output = "HTTP/1.1 200 OK\r\n";
+        size_t header_end = cgi_output.find("\r\n\r\n");
+
+        if (header_end != std::string::npos) {
+            std::string cgi_headers = cgi_output.substr(0, header_end);
+            
+            if (cgi_headers.find("Content-Type:") == std::string::npos) {
+                formatted_output += "Content-Type: text/plain\r\n";
+            }
+            
+            if (cgi_headers.find("Content-Length:") == std::string::npos) {
+                std::stringstream ss;
+                ss << (cgi_output.length() - (header_end + 4));
+                formatted_output += "Content-Length: " + ss.str() + "\r\n";
+            }
+            
+            formatted_output += cgi_output;
+        } else {
+            formatted_output += "Content-Type: text/plain\r\n";
+            std::stringstream ss;
+            ss << cgi_output.length();
+            formatted_output += "Content-Length: " + ss.str() + "\r\n\r\n";
+            formatted_output += cgi_output;
+        }
+
+        return formatted_output;
     }
 }

@@ -26,7 +26,8 @@ public:
     std::string getUri() const;
     std::string getVersion() const;
     std::string getHeader(const std::string& key) const;
-    std::string getBody() const;
+    const std::string& getBody() const;
+    const std::map<std::string, std::string>& getHeaders() const;
     bool isParsed() const;
 };
 

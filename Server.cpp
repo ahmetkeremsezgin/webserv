@@ -10,6 +10,7 @@
 #include <iostream>
 #include <vector>
 #include <map>
+#include <signal.h>
 
 struct serverState {
     std::map<int, Server> serverConfigs;
@@ -17,6 +18,8 @@ struct serverState {
 };
 
 ServerRunner::ServerRunner(std::vector<Server> servers) {
+    signal(SIGPIPE, SIG_IGN);
+
     serverState state;
     fd_set readfds;
     fd_set writefds;
@@ -45,7 +48,7 @@ ServerRunner::ServerRunner(std::vector<Server> servers) {
             continue;
         }
 
-        if (listen(sfd, 5) < 0) {
+        if (listen(sfd, SOMAXCONN) < 0) { 
             std::cerr << "Listen error" << std::endl;
             close(sfd);
             continue;
@@ -62,7 +65,6 @@ ServerRunner::ServerRunner(std::vector<Server> servers) {
         return;
     }
 
-    std::cout << "Servers started, waiting for connections..." << std::endl;
 
     while (true) {
         FD_ZERO(&readfds);
@@ -93,7 +95,7 @@ ServerRunner::ServerRunner(std::vector<Server> servers) {
 
         int activity = select(current_maxfd + 1, &readfds, &writefds, NULL, NULL);
         if (activity < 0) {
-            std::cerr << "Select error" << std::endl;
+            std::cerr << "\033[1;31m[SERVER] Select error!\033[0m" << std::endl;
             continue;
         }
 
@@ -105,12 +107,10 @@ ServerRunner::ServerRunner(std::vector<Server> servers) {
                 int new_client_fd = accept(sfd, (struct sockaddr *)&clientAddress, &addrlen);
                 
                 if (new_client_fd < 0) {
-                    std::cerr << "Accept error" << std::endl;
+                    std::cerr << "\033[1;31m[SERVER] Accept error\033[0m" << std::endl;
                     continue;
                 }
-                
-                std::cout << "New connection accepted. Port: " << it->second.port << ", FD: " << new_client_fd << std::endl;
-                
+                                
                 state.clients[new_client_fd] = new Client(new_client_fd, it->second);
             }
         }
@@ -123,7 +123,6 @@ ServerRunner::ServerRunner(std::vector<Server> servers) {
 
             if (FD_ISSET(client_fd, &readfds)) {
                 if (!client_obj->readData()) {
-                    std::cout << "Client disconnected, FD: " << client_fd << std::endl;
                     disconnect_client = true;
                 } else if (client_obj->isRequestReady() && !client_obj->isResponseReady()) {
                     client_obj->processRequest();
@@ -132,7 +131,6 @@ ServerRunner::ServerRunner(std::vector<Server> servers) {
 
             if (!disconnect_client && FD_ISSET(client_fd, &writefds)) {
                 if (!client_obj->sendData()) {
-                    std::cout << "Client task finished or disconnected, FD: " << client_fd << std::endl;
                     disconnect_client = true;
                 }
             }

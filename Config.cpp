@@ -2,6 +2,7 @@
 #include <fstream>
 #include <sstream>
 #include <cstdlib>
+#include <iostream>
 
 Config::Config(const Config& conf) { *this = conf; }
 Config& Config::operator=(const Config& conf) {
@@ -95,6 +96,7 @@ void Config::parseServer(std::vector<std::string>::iterator& it, std::vector<std
         }
     }
     servers.push_back(srv);
+    
     if (it != end) ++it;
 }
 
@@ -102,7 +104,7 @@ void Config::parseLocation(Server& srv, std::vector<std::string>::iterator& it, 
     Location loc;
     loc.url = *it;
     ++it;
-    ++it; 
+    ++it;
 
     loc.autoindex = false;
     loc.upload = false;
@@ -151,4 +153,8 @@ void Config::parseLocation(Server& srv, std::vector<std::string>::iterator& it, 
         }
     }
     srv.locations.push_back(loc);
+
+    if (it != end && *it == "}") {
+        ++it;
+    }
 }

@@ -6,7 +6,20 @@
 #include <cstdio>
 #include <dirent.h>
 #include <sys/stat.h>
+#include <iostream>
 #include "Cgi.hpp"
+
+static std::string cleanUriStr(std::string uri) {
+    size_t qPos = uri.find('?');
+    if (qPos != std::string::npos) {
+        uri = uri.substr(0, qPos);
+    }
+    size_t endpos = uri.find_last_not_of(" \t\r\n");
+    if (endpos != std::string::npos) {
+        uri = uri.substr(0, endpos + 1);
+    }
+    return uri;
+}
 
 HttpResponse::HttpResponse(const HttpRequest& req, const Server& config) 
     : _request(req), _serverConfig(config), _statusCode(200), _statusMessage("OK") {
@@ -19,22 +32,62 @@ std::string HttpResponse::getRawResponse() const {
     return _rawResponse;
 }
 
-// YALIN VE TEMİZ EŞLEŞTİRME (NGINX STANDARTI)
-const Location* HttpResponse::matchLocation(const std::string& uri) {
+const Location* HttpResponse::matchLocation(const std::string& rawUri) {
     const Location* best_match = NULL;
     size_t longest_match = 0;
+    
+    std::string uri = cleanUriStr(rawUri);
+    std::string currentMethod = _request.getMethod();
 
     for (size_t i = 0; i < _serverConfig.locations.size(); ++i) {
-        const std::string& locUrl = _serverConfig.locations[i].url;
-        
-        // 1. Standart Prefix Eşleşmesi (Örn: uri "/path", locUrl "/path")
-        if (uri.find(locUrl) == 0) {
+        std::string locUrl = _serverConfig.locations[i].url;
+        size_t endpos = locUrl.find_last_not_of(" \t\r\n");
+        if (endpos != std::string::npos) {
+            locUrl = locUrl.substr(0, endpos + 1);
+        }
+
+        if (locUrl.length() > 1 && locUrl[0] == '*') {
+            std::string ext = locUrl.substr(1);
+            if (uri.length() >= ext.length() && 
+                uri.compare(uri.length() - ext.length(), ext.length(), ext) == 0) {
+                
+                bool methodOk = false;
+                for (size_t m = 0; m < _serverConfig.locations[i].allowedMethods.size(); ++m) {
+                    if (_serverConfig.locations[i].allowedMethods[m] == currentMethod) {
+                        methodOk = true;
+                        break;
+                    }
+                }
+
+                if (methodOk) {
+                    return &_serverConfig.locations[i];
+                } else {
+                    continue;
+                }
+            }
+            continue; 
+        }
+
+        if (uri == locUrl) {
             if (locUrl.length() > longest_match) {
                 best_match = &_serverConfig.locations[i];
                 longest_match = locUrl.length();
             }
         }
-        // 2. Nginx Trailing-Slash Toleransı (Örn: uri "/directory", locUrl "/directory/")
+        else if (uri.find(locUrl) == 0) {
+            bool isValidPrefix = false;
+            if (locUrl == "/" || locUrl[locUrl.length() - 1] == '/') {
+                isValidPrefix = true; 
+            } else if (uri.length() > locUrl.length() && uri[locUrl.length()] == '/') {
+                isValidPrefix = true; 
+            }
+
+            if (isValidPrefix && locUrl.length() > longest_match) {
+                best_match = &_serverConfig.locations[i];
+                longest_match = locUrl.length();
+            }
+        }
+        
         else if (locUrl.length() > 1 && locUrl[locUrl.length() - 1] == '/') {
             std::string locNoSlash = locUrl.substr(0, locUrl.length() - 1);
             if (uri == locNoSlash) {
@@ -45,6 +98,7 @@ const Location* HttpResponse::matchLocation(const std::string& uri) {
             }
         }
     }
+
     return best_match;
 }
 
@@ -99,19 +153,15 @@ void HttpResponse::generateErrorResponse(int code) {
     _body = ss.str();
 }
 
-// TEMİZ GET İŞLEYİCİSİ (Hiçbir tester hack'i yok)
 void HttpResponse::handleGet(const Location* loc) {
-    std::string targetPath = loc->path; // root klasörü
-    std::string uri = _request.getUri();
-    std::string locUrl = loc->url;
+    std::string targetPath = loc->path; 
+    std::string uri = cleanUriStr(_request.getUri());
 
-    // Kök dizin (root) ile URI'nin eşleşen kısımlarını güvenle birleştir
-    std::string subPath = "";
-    if (uri.find(locUrl) == 0) {
-        subPath = uri.substr(locUrl.length());
+    std::string subPath = uri;
+    if (loc->url.length() > 0 && loc->url[0] != '*' && uri.find(loc->url) == 0) {
+        subPath = uri.substr(loc->url.length());
     }
 
-    // Klasörleri güvenle birbirine bağla (Slash karmaşasını önler)
     if (!subPath.empty()) {
         if (targetPath[targetPath.length() - 1] == '/' && subPath[0] == '/') {
             targetPath += subPath.substr(1);
@@ -121,8 +171,7 @@ void HttpResponse::handleGet(const Location* loc) {
             targetPath += subPath;
         }
     }
-
-    // Hedef bir KLASÖR ise index dosyasını ara
+    
     if (isDirectory(targetPath)) {
         std::string indexPath = targetPath;
         if (indexPath[indexPath.length() - 1] != '/') {
@@ -144,10 +193,13 @@ void HttpResponse::handleGet(const Location* loc) {
         if (loc->autoindex) {
             handleAutoindex(targetPath, uri);
         } else {
-            generateErrorResponse(403);
+            if (!loc->index_path.empty()) {
+                generateErrorResponse(404);
+            } else {
+                generateErrorResponse(403);
+            }
         }
     } 
-    // Hedef bir DOSYA ise doğrudan oku
     else {
         if (executeCgiIfMatch(targetPath, loc)) return;
 
@@ -197,44 +249,55 @@ void HttpResponse::buildResponse() {
         return; 
     }
 
-    std::ostringstream responseStream;
+std::ostringstream responseStream;
     responseStream << "HTTP/1.1 " << _statusCode << " " << _statusMessage << "\r\n";
     responseStream << "Content-Type: " << _contentType << "\r\n";
     responseStream << "Content-Length: " << _body.length() << "\r\n";
+    responseStream << "Connection: close\r\n";
     responseStream << "\r\n";
     
-    // HEAD isteği için NGINX kuralı: Gövde gönderilmez.
     if (_request.getMethod() != "HEAD") {
         responseStream << _body;
     }
 
     _rawResponse = responseStream.str();
 }
-
 void HttpResponse::handlePost(const Location* loc) {
     std::string targetPath = loc->path;
-    if (_request.getUri() != loc->url) {
-        targetPath += _request.getUri().substr(loc->url.length());
+    std::string uri = cleanUriStr(_request.getUri());
+
+    std::string subPath = uri;
+    if (loc->url.length() > 0 && loc->url[0] != '*' && uri.find(loc->url) == 0) {
+        subPath = uri.substr(loc->url.length());
     }
 
-    if (executeCgiIfMatch(targetPath, loc)) {
-        return;
+    if (!subPath.empty()) {
+        if (targetPath[targetPath.length() - 1] == '/' && subPath[0] == '/') {
+            targetPath += subPath.substr(1);
+        } else if (targetPath[targetPath.length() - 1] != '/' && subPath[0] != '/') {
+            targetPath += "/" + subPath;
+        } else {
+            targetPath += subPath;
+        }
     }
 
-    if (!loc->upload) {
-        generateErrorResponse(403);
-        return;
-    }
+    if (executeCgiIfMatch(targetPath, loc)) return;
 
     if (loc->max_byte > 0 && _request.getBody().length() > (size_t)loc->max_byte) {
         generateErrorResponse(413);
         return;
     }
 
-    std::string uploadDir = loc->upload_path;
-    if (uploadDir.empty()) {
-        uploadDir = "/tmp/www/uploads";
+    if (!loc->upload) {
+        _statusCode = 200;
+        _statusMessage = "OK";
+        _contentType = "text/plain";
+        _body = "POST request accepted successfully.";
+        return;
     }
+
+    std::string uploadDir = loc->upload_path;
+    if (uploadDir.empty()) uploadDir = "/tmp/www/uploads";
 
     std::string body = _request.getBody();
     std::string filename = "";
@@ -246,10 +309,8 @@ void HttpResponse::handlePost(const Location* loc) {
     
     if (boundaryPos != std::string::npos) {
         boundary = "--" + contentType.substr(boundaryPos + 9);
-        
         size_t startBoundary = body.find(boundary);
         if (startBoundary != std::string::npos) {
-            
             size_t filenamePos = body.find("filename=\"", startBoundary);
             if (filenamePos != std::string::npos) {
                 filenamePos += 10;
@@ -258,19 +319,13 @@ void HttpResponse::handlePost(const Location* loc) {
                     filename = body.substr(filenamePos, filenameEnd - filenamePos);
                 }
             }
-
             size_t dataStart = body.find("\r\n\r\n", startBoundary);
             if (dataStart != std::string::npos) {
                 dataStart += 4;
-                
                 std::string endBoundary = "\r\n" + boundary;
                 size_t dataEnd = body.find(endBoundary, dataStart);
-                
-                if (dataEnd != std::string::npos) {
-                    fileContent = body.substr(dataStart, dataEnd - dataStart);
-                } else {
-                    fileContent = body.substr(dataStart);
-                }
+                if (dataEnd != std::string::npos) fileContent = body.substr(dataStart, dataEnd - dataStart);
+                else fileContent = body.substr(dataStart);
             }
         }
     }
@@ -296,25 +351,26 @@ void HttpResponse::handlePost(const Location* loc) {
     _statusCode = 201;
     _statusMessage = "Created";
     _contentType = "text/html";
-    
-    std::ostringstream responseBody;
-    responseBody << "<html><body>";
-    responseBody << "<h2>Dosya Basariyla Yuklendi!</h2>";
-    responseBody << "<p><strong>Kaydedilen Yol:</strong> " << fullPath << "</p>";
-    responseBody << "</body></html>";
-    
-    _body = responseBody.str();
+    _body = "<html><body><h2>Dosya Basariyla Yuklendi!</h2></body></html>";
 }
 
 void HttpResponse::handleDelete(const Location* loc) {
     std::string targetPath = loc->path;
-    
-    if (_request.getUri() != loc->url) {
-        std::string subPath = _request.getUri().substr(loc->url.length());
-        targetPath += subPath;
-    } else {
-        generateErrorResponse(403);
-        return;
+    std::string uri = cleanUriStr(_request.getUri());
+
+    std::string subPath = uri;
+    if (loc->url.length() > 0 && loc->url[0] != '*' && uri.find(loc->url) == 0) {
+        subPath = uri.substr(loc->url.length());
+    }
+
+    if (!subPath.empty()) {
+        if (targetPath[targetPath.length() - 1] == '/' && subPath[0] == '/') {
+            targetPath += subPath.substr(1);
+        } else if (targetPath[targetPath.length() - 1] != '/' && subPath[0] != '/') {
+            targetPath += "/" + subPath;
+        } else {
+            targetPath += subPath;
+        }
     }
 
     if (std::remove(targetPath.c_str()) == 0) {
@@ -329,9 +385,7 @@ void HttpResponse::handleDelete(const Location* loc) {
 
 bool HttpResponse::isDirectory(const std::string& path) {
     struct stat statbuf;
-    if (stat(path.c_str(), &statbuf) != 0) {
-        return false;
-    }
+    if (stat(path.c_str(), &statbuf) != 0) return false;
     return S_ISDIR(statbuf.st_mode);
 }
 
@@ -347,9 +401,7 @@ void HttpResponse::handleAutoindex(const std::string& targetPath, const std::str
         while ((ent = readdir(dir)) != NULL) {
             std::string filename = ent->d_name;
             html << "<a href=\"" << uri;
-            if (uri.length() > 0 && uri[uri.length() - 1] != '/') {
-                html << "/";
-            }
+            if (uri.length() > 0 && uri[uri.length() - 1] != '/') html << "/";
             html << filename << "\">" << filename << "</a><br>";
         }
         closedir(dir);

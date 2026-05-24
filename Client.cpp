@@ -90,7 +90,6 @@ void Client::processRequest() {
         return;
     }
 
-    // Yeni Response Sınıfımızı Kullanıyoruz!
     HttpResponse response(_request, _serverConfig);
     _responseBuffer = response.getRawResponse();
 

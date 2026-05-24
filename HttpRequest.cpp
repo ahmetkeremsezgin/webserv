@@ -1,6 +1,7 @@
 #include "HttpRequest.hpp"
 #include <sstream>
 #include <iostream>
+#include <cstdlib>
 
 HttpRequest::HttpRequest() : _isParsed(false) {}
 
@@ -9,9 +10,11 @@ HttpRequest::~HttpRequest() {}
 std::string HttpRequest::getMethod() const { return _method; }
 std::string HttpRequest::getUri() const { return _uri; }
 std::string HttpRequest::getVersion() const { return _version; }
-std::string HttpRequest::getBody() const { return _body; }
+const std::string& HttpRequest::getBody() const { return _body; }
 bool HttpRequest::isParsed() const { return _isParsed; }
-
+const std::map<std::string, std::string>& HttpRequest::getHeaders() const {
+    return _headers;
+}
 std::string HttpRequest::getHeader(const std::string& key) const {
     std::map<std::string, std::string>::const_iterator it = _headers.find(key);
     if (it != _headers.end()) {
@@ -68,8 +71,38 @@ void HttpRequest::parse(const std::string& raw_request) {
         line_number++;
     }
 
-    if (raw_request.length() > header_end + 4) {
-        _body = raw_request.substr(header_end + 4);
+if (raw_request.length() > header_end + 4) {
+        size_t body_start = header_end + 4;
+        size_t body_length = raw_request.length() - body_start;
+        
+        if (getHeader("Transfer-Encoding") == "chunked") {
+            size_t pos = body_start;
+            while (pos < raw_request.length()) {
+                size_t crlf_pos = raw_request.find("\r\n", pos);
+                if (crlf_pos == std::string::npos) break;
+                
+                std::string hexStr = raw_request.substr(pos, crlf_pos - pos);
+                size_t chunkSize = std::strtoul(hexStr.c_str(), NULL, 16);
+                
+                if (chunkSize == 0) break;
+            
+                pos = crlf_pos + 2;
+                if (pos + chunkSize <= raw_request.length()) {
+                    _body.append(raw_request, pos, chunkSize);
+                }
+                pos += chunkSize + 2;
+            }
+        } 
+        else {
+            std::string cl_str = getHeader("Content-Length");
+            if (!cl_str.empty()) {
+                size_t expected_length = std::strtoul(cl_str.c_str(), NULL, 10);
+                _body.reserve(expected_length > body_length ? expected_length : body_length);
+            } else {
+                _body.reserve(body_length);
+            }
+            _body.assign(raw_request, body_start, body_length);
+        }
     }
 
     if (!_method.empty() && !_uri.empty()) {
