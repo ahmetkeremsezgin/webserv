@@ -25,7 +25,8 @@ struct Location {
 };
 
 struct Server {
-    std::string interface;
+    std::string interface;   // listen host (bind address), default 0.0.0.0
+    std::string server_name;
     int server_fd;
     int port;
     long long max_byte;
@@ -42,9 +43,32 @@ public:
     Config(std::string file_path);
 
 private:
-    void parse(std::vector<std::string>& tokens);
-    void parseServer(std::vector<std::string>::iterator& it, std::vector<std::string>::iterator end);
-    void parseLocation(Server& server, std::vector<std::string>::iterator& it, std::vector<std::string>::iterator end);
+    std::vector<std::string> _tokens;
+    size_t _pos;
+
+    // Reads the file, splits it into tokens and parses every server block.
+    void tokenize(const std::string& content);
+    void parse();
+    void parseServer();
+    void parseLocation(Server& server);
+
+    // Token cursor: walk over _tokens while reporting precise errors.
+    bool eof() const;
+    const std::string& peek() const;
+    const std::string& advance();
+    bool accept(const std::string& token);
+    void expect(const std::string& token, const std::string& context);
+    const std::string& expectValue(const std::string& directive);
+    void expectSemicolon(const std::string& directive);
+
+    // Value parsing & validation (each throws on a malformed value).
+    static void error(const std::string& message);
+    static bool isNumber(const std::string& value);
+    static bool toToggle(const std::string& value, const std::string& directive);
+    static int toPort(const std::string& value);
+    static int toErrorCode(const std::string& value);
+    static long long toSize(const std::string& value, const std::string& directive);
+    static void splitHostPort(const std::string& value, std::string& host, std::string& port);
 };
 
 #endif
