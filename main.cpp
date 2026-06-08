@@ -1,15 +1,26 @@
-#include <iostream>
-#include "Config.hpp"
 #include "Server.hpp"
+#include <csignal>
 
-int main(int argc, char *argv[]) {
-    if (argc != 2)
-        return (std::cerr << "./webserv [conf file]" << std::endl, 1);
+volatile sig_atomic_t g_running = 1;
+
+void handleSigint(int sig) {
+    (void)sig;
+    g_running = 0;
+}
+
+int main(int argc, char **argv) {
+    signal(SIGPIPE, SIG_IGN);
+    signal(SIGINT, handleSigint);
+
+    if (argc != 2) {
+        std::cerr << "Usage: ./webserv <config_file>" << std::endl;
+        return 1;
+    }
     try {
-        Config config(argv[1]);
-        ServerRunner server(config.servers);
+        Server webserv(argv[1]);
+        webserv.run();
     } catch (const std::exception& e) {
-        std::cerr << e.what() << std::endl;
+        std::cerr << "Error: " << e.what() << std::endl;
         return 1;
     }
     return 0;

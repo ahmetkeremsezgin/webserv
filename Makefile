@@ -3,12 +3,12 @@ CXX = c++
 CXXFLAGS = -Wall -Wextra -Werror -std=c++98
 
 SRCS = main.cpp \
+	Socket.cpp \
 	Cgi.cpp \
-	Server.cpp \
+	Utils.cpp \
 	Config.cpp \
-	Client.cpp \
-	HttpRequest.cpp \
-	HttpResponse.cpp \
+	Server.cpp \
+	Methods.cpp \
 
 OBJS = $(SRCS:.cpp=.o)
 

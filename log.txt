@@ -1,0 +1,9 @@
+Listening on port 8080 (fd 3)
+Listening on port 9090 (fd 4)
+Listening on port 6060 (fd 5)
+Server running...
+[CGI HEADERS]
+  [Accept-Encoding] = [gzip]
+  [Host] = [localhost:6060]
+  [User-Agent] = [Go-http-client/1.1]
+Shutting down...
