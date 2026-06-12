@@ -1,39 +1,38 @@
 #include "Server.hpp"
-#include "Utils.hpp"
+#include "FileUtils.hpp"
 
-#include <unistd.h>
-#include <fcntl.h>
-#include <cstring>
 #include <cstdio>
-#include <sstream>
 #include <fstream>
-#include <stdexcept>
+
+static const std::string* findCgiInterpreter(const LocationConfig& loc,
+                                             const std::string& filepath) {
+    std::string::size_type dot = filepath.rfind('.');
+    if (dot == std::string::npos)
+        return NULL;
+
+    std::map<std::string, std::string>::const_iterator it = loc.cgi.find(filepath.substr(dot));
+    if (it == loc.cgi.end())
+        return NULL;
+    return &it->second;
+}
 
 std::string Server::handleGet(const LocationConfig& loc, const HttpRequest& req,
                               const ServerConfig& server, int client_fd) {
-    std::string cleanPath = req.path;
-    std::string::size_type qpos = cleanPath.find('?');
-    if (qpos != std::string::npos)
-        cleanPath = cleanPath.substr(0, qpos);
-
+    std::string cleanPath = stripQuery(req.path);
     std::string filepath = resolvePath(loc, cleanPath);
 
-    std::string::size_type dot = filepath.rfind('.');
-    if (dot != std::string::npos) {
-        std::string ext = filepath.substr(dot);
-        std::map<std::string, std::string>::const_iterator it = loc.cgi.find(ext);
-        if (it != loc.cgi.end()) {
-            startCGI(it->second, filepath, req, client_fd);
-            return "";
-        }
+    const std::string* interpreter = findCgiInterpreter(loc, filepath);
+    if (interpreter) {
+        startCGI(*interpreter, filepath, req, client_fd);
+        return "";
     }
 
-    int type = pathType(filepath);
+    PathType type = pathType(filepath);
 
-    if (type == 0)
+    if (type == PATH_NOT_FOUND)
         return buildError(404, server);
 
-    if (type == 1) {
+    if (type == PATH_FILE) {
         std::string content;
         if (readFile(filepath, content))
             return buildResponse(200, "OK", getMimeType(filepath), content);
@@ -46,7 +45,7 @@ std::string Server::handleGet(const LocationConfig& loc, const HttpRequest& req,
     indexPath += (loc.index.empty() ? "index.html" : loc.index);
 
     std::string content;
-    if (pathType(indexPath) == 1 && readFile(indexPath, content))
+    if (pathType(indexPath) == PATH_FILE && readFile(indexPath, content))
         return buildResponse(200, "OK", getMimeType(indexPath), content);
 
     if (loc.autoindex) {
@@ -59,15 +58,13 @@ std::string Server::handleGet(const LocationConfig& loc, const HttpRequest& req,
 }
 
 std::string Server::handleDelete(const LocationConfig& loc, const HttpRequest& req,
-                                 const ServerConfig& server, int client_fd) {
-    (void)client_fd;
-
+                                 const ServerConfig& server) {
     std::string filepath = resolvePath(loc, req.path);
-    int type = pathType(filepath);
+    PathType type = pathType(filepath);
 
-    if (type == 0)
+    if (type == PATH_NOT_FOUND)
         return buildError(404, server);
-    if (type == 2)
+    if (type == PATH_DIRECTORY)
         return buildError(403, server);
     if (std::remove(filepath.c_str()) != 0)
         return buildError(403, server);
@@ -78,28 +75,14 @@ std::string Server::handleDelete(const LocationConfig& loc, const HttpRequest& r
 
 std::string Server::handlePost(const LocationConfig& loc, const HttpRequest& req,
                                const ServerConfig& server, int client_fd) {
-    std::string cleanPath = req.path;
-    std::string::size_type qpos = cleanPath.find('?');
-    if (qpos != std::string::npos)
-        cleanPath = cleanPath.substr(0, qpos);
-
+    std::string cleanPath = stripQuery(req.path);
     std::string filepath = resolvePath(loc, cleanPath);
 
-    std::string::size_type dot = filepath.rfind('.');
-    if (dot != std::string::npos) {
-        std::string ext = filepath.substr(dot);
-        std::map<std::string, std::string>::const_iterator it = loc.cgi.find(ext);
-        if (it != loc.cgi.end()) {
-            startCGI(it->second, filepath, req, client_fd);
-            return "";
-        }
+    const std::string* interpreter = findCgiInterpreter(loc, filepath);
+    if (interpreter) {
+        startCGI(*interpreter, filepath, req, client_fd);
+        return "";
     }
-
-    size_t limit = (loc.client_max_body_size > 0)
-                   ? loc.client_max_body_size
-                   : server.client_max_body_size;
-    if (req.body.size() > limit)
-        return buildError(413, server);
 
     if (loc.upload_enable) {
         if (loc.upload_store.empty())
@@ -121,7 +104,6 @@ std::string Server::handlePost(const LocationConfig& loc, const HttpRequest& req
         if (!out.is_open())
             return buildError(500, server);
         out.write(req.body.c_str(), req.body.size());
-        out.close();
 
         std::string body = "<html><body><h1>201 Created</h1><p>File uploaded.</p></body></html>";
         return buildResponse(201, "Created", "text/html", body);
@@ -149,12 +131,18 @@ std::string Server::handleRequest(const HttpRequest& req, const ServerConfig& se
     if (loc->allowed_methods.find(req.method) == loc->allowed_methods.end())
         return buildError(405, server);
 
+    size_t body_limit = (loc->client_max_body_size > 0)
+                        ? loc->client_max_body_size
+                        : server.client_max_body_size;
+    if (req.body.size() > body_limit)
+        return buildError(413, server);
+
     if (req.method == "GET")
         return handleGet(*loc, req, server, client_fd);
-    if (req.method == "DELETE")
-        return handleDelete(*loc, req, server, client_fd);
     if (req.method == "POST")
         return handlePost(*loc, req, server, client_fd);
+    if (req.method == "DELETE")
+        return handleDelete(*loc, req, server);
 
     return buildError(501, server);
 }
